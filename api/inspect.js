@@ -12,28 +12,33 @@ function isValidShareUrl(value) {
   }
 }
 
+function stripMarkup(value) {
+  return value.split("<").map((part, index) => index === 0 ? part : part.slice(part.indexOf(">") + 1)).join(" ");
+}
+
 function cleanText(value) {
-  return value
-    .replace(/<script\\b[^>]*>[\\s\\S]*?<\\/script>/gi, "")
-    .replace(/<style\\b[^>]*>[\\s\\S]*?<\\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/\\s+/g, " ")
+  return stripMarkup(value)
+    .replaceAll("&amp;", "&")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replace(/\s+/g, " ")
     .trim()
     .slice(0, 200);
 }
 
 function findDownloadLink(html, baseUrl) {
-  const anchors = html.match(/<a\\b[^>]*>[\\s\\S]*?<\\/a>/gi) || [];
-  for (const anchor of anchors) {
-    const hrefMatch = anchor.match(/\\bhref\\s*=\\s*["']([^"']+)["']/i);
-    if (!hrefMatch || !/download|unduh/i.test(cleanText(anchor))) continue;
+  const anchors = html.split("<a").slice(1);
+  for (const part of anchors) {
+    const end = part.toLowerCase().indexOf("</a>");
+    if (end < 0) continue;
+    const anchor = part.slice(0, end);
+    if (!/download|unduh/i.test(cleanText(anchor))) continue;
+    const match = anchor.match(/href\s*=\s*["']([^"']+)["']/i);
+    if (!match) continue;
     try {
-      const url = new URL(hrefMatch[1], baseUrl);
+      const url = new URL(match[1], baseUrl);
       if (url.protocol === "https:" && url.hostname === ALLOWED_HOST) return url.href;
     } catch {}
   }
@@ -51,10 +56,7 @@ export default async function handler(req, res) {
 
   const shareUrl = req.body?.url;
   if (typeof shareUrl !== "string" || shareUrl.length > 2048 || !isValidShareUrl(shareUrl)) {
-    return res.status(400).json({
-      ok: false,
-      message: "Masukkan link HTTPS dari drive.ucweb.com/s/ yang valid."
-    });
+    return res.status(400).json({ ok: false, message: "Masukkan link HTTPS dari drive.ucweb.com/s/ yang valid." });
   }
 
   try {
@@ -62,50 +64,31 @@ export default async function handler(req, res) {
       method: "GET",
       redirect: "manual",
       signal: AbortSignal.timeout(10000),
-      headers: {
-        "Accept": "text/html",
-        "User-Agent": "Mozilla/5.0 (compatible; ShareLinkChecker/1.0)"
-      }
+      headers: { "Accept": "text/html", "User-Agent": "Mozilla/5.0 (compatible; ShareLinkChecker/1.0)" }
     });
 
     if (response.status >= 300 && response.status < 400) {
-      return res.status(200).json({
-        ok: true, mode: "redirect",
-        message: "UC Drive mengarahkan halaman ke lokasi lain. Buka halaman resmi untuk melanjutkan.",
-        shareUrl
-      });
+      return res.status(200).json({ ok: true, mode: "redirect", message: "UC Drive mengarahkan halaman ke lokasi lain. Buka halaman resmi untuk melanjutkan.", shareUrl });
     }
-
     if (!response.ok) {
-      return res.status(200).json({
-        ok: true, mode: "unavailable",
-        message: `Halaman UC Drive tidak dapat diperiksa (HTTP ${response.status}). Coba buka halaman resminya secara langsung.`,
-        shareUrl
-      });
+      return res.status(200).json({ ok: true, mode: "unavailable", message: "Halaman UC Drive tidak dapat diperiksa (HTTP " + response.status + ").", shareUrl });
     }
 
     const contentType = response.headers.get("content-type") || "";
     if (!contentType.toLowerCase().includes("text/html")) {
-      return res.status(200).json({
-        ok: true, mode: "unavailable",
-        message: "UC Drive tidak mengembalikan halaman HTML yang dapat diperiksa.",
-        shareUrl
-      });
+      return res.status(200).json({ ok: true, mode: "unavailable", message: "UC Drive tidak mengembalikan halaman HTML yang dapat diperiksa.", shareUrl });
     }
 
     const html = await response.text();
-    const titleMatch = html.match(/<title[^>]*>([\\s\\S]*?)<\\/title>/i);
-    const title = titleMatch ? cleanText(titleMatch[1]) : "Halaman UC Drive";
+    const titleStart = html.toLowerCase().indexOf("<title");
+    const titleOpenEnd = titleStart >= 0 ? html.indexOf(">", titleStart) : -1;
+    const titleEnd = titleOpenEnd >= 0 ? html.toLowerCase().indexOf("</title>", titleOpenEnd) : -1;
+    const title = titleEnd > titleOpenEnd ? cleanText(html.slice(titleOpenEnd + 1, titleEnd)) : "Halaman UC Drive";
     const downloadUrl = findDownloadLink(html, shareUrl);
 
     if (downloadUrl) {
-      return res.status(200).json({
-        ok: true, mode: "download-link", title,
-        message: "Tautan unduhan ditemukan di halaman resmi.",
-        shareUrl, downloadUrl
-      });
+      return res.status(200).json({ ok: true, mode: "download-link", title, message: "Tautan unduhan ditemukan di halaman resmi.", shareUrl, downloadUrl });
     }
-
     return res.status(200).json({
       ok: true, mode: "app-required-or-dynamic", title,
       message: "Tidak ditemukan tautan unduhan langsung di HTML. Halaman mungkin memerlukan JavaScript, login, atau aplikasi UC Drive.",
